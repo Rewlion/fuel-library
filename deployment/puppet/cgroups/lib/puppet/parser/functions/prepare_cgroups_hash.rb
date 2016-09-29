@@ -2,6 +2,109 @@ require 'json'
 
 module CgroupsSettings
   require 'facter'
+  # validates input values for service's properties
+class RedhatValidator
+  @nop = ->() {true}
+
+  @bool_validator = lambda do |str|
+    str.to_s == 'true' || str.to_s == 'false'
+  end
+
+  @shares_value_validator = lambda do |value|
+    valid_syntax = value.to_s =~ /^[0-9]+$/
+
+    return (2..262_144).cover?(value.to_s.to_i) if valid_syntax
+    false
+  end
+
+  @cpuquota_value_validator = lambda do |value|
+    value.to_s =~ /^[0-9]+%$/
+  end
+
+  @memory_value_validator = lambda do |value|
+    value.to_s =~ /^[0-9]+[K|M|G|T]?$/
+  end
+
+  @taskmax_value_validator = lambda do |value|
+    value.to_s =~ /^[0-9]+$/
+  end
+
+  @blockweight_value_validator = lambda do |value|
+    valid_syntax = value =~ %r{^/dev/.+\s+[0-9]+$}
+
+    return (1..1000).cover?(value.split[1].to_i) if valid_syntax
+    false
+  end
+
+  @devicebites_value_validator = lambda do |value|
+    value =~ %r{^/dev/.+\s+[0-9]+[K|M|G|T]?$}
+  end
+
+  @deviceallow_value_validator = lambda do |value|
+    value =~ %r{^/dev/.+\s+[r|w|x]?$}
+  end
+
+  @devicepolicy_value_validator = lambda do |value|
+    value.to_s =~ /strict|auto|closed/
+  end
+
+  @validators_by_property_hash = {
+    'CPUAccounting' =>         @bool_validator,
+    'MemoryAccounting' =>      @bool_validator,
+    'TasksAccounting' =>       @bool_validator,
+    'BlockIOAccounting' =>     @bool_validator,
+    'CPUShares' =>             @shares_value_validator,
+    'StartupCPUShares' =>      @shares_value_validator,
+    'CPUQuota' =>              @cpuquota_value_validator,
+    'MemoryLimit' =>           @memory_value_validator,
+    'TasksMax' =>              @taskmax_value_validator,
+    'BlockIODeviceWeight' =>   @blockweight_value_validator,
+    'BlockIOReadBandwidth' =>  @devicebites_value_validator,
+    'BlockIOWriteBandwidth' => @devicebites_value_validator,
+    'DeviceAllow' =>           @deviceallow_value_validator,
+    'DevicePolicy' =>          @devicepolicy_value_validator,
+    'Slice' =>                 @nop,
+    'Delegate' =>              @nop
+  }
+
+  def self.validate_option(service, property, value)
+    err_by_type = "#{service}::#{property}::#{value} is not a type of[String,Integer]"
+    err_by_value = "#{service}::#{property}::#{value} is not valid"
+    err_by_unknown = "#{service}::#{property} is not supported"
+
+    validator = @validators_by_property_hash[property]
+    
+    raise(err_by_type) unless value.is_a?(String) || value.is_a?(Integer)
+    raise(err_by_unknown) if validator.is_a?(NilClass)
+    raise(err_by_value) unless validator.call(value)
+  end
+end
+
+  
+  def CgroupsSettings.parse_properties(service, json)
+    options = JSON.parse(json) rescue raise("#{service}::#{json} invalid json")
+
+    unless options.is_a?(Hash)
+      raise(Puppet::ParseError, "#{service}::#{options} is not a hash")
+    end
+
+    v = CgroupsSettings::RedhatValidator
+    options.each do |property, value|
+      v.validate_option(service, property, value)
+    end
+
+    options
+  end
+
+  def CgroupsSettings.parse_redhat_settings(settings)
+    settings.each do |service, properties|
+      settings[service] = CgroupsSettings.parse_properties(service, properties)
+    end
+
+    settings
+  end
+
+
   # value is valid if value has integer type or
   # matches with pattern: %percent, min_value, max_value
   def self.handle_value(option, value)
@@ -25,6 +128,24 @@ module CgroupsSettings
     return value * 1024 * 1024
   end
 end
+
+ def CgroupsSettings.parse_debian_settings(cgroups)
+    serialized_data = {}
+
+    cgroups.each do |service, settings|
+      hash_settings = JSON.parse(settings) rescue raise("'#{service}': JSON parsing  error for : #{settings}")
+      hash_settings.each do |group, options|
+        raise("'#{service}': group '#{group}' options is not a HASH instance") unless options.is_a?(Hash)
+        options.each do |option, value|
+          options[option] = CgroupsSettings.handle_value(option, value)
+          raise("'#{service}': group '#{group}': option '#{option}' has wrong value") if options[option].nil?
+        end
+      end
+      serialized_data[service] = hash_settings unless hash_settings.empty?
+    end
+    serialized_data
+  end
+
 
 Puppet::Parser::Functions::newfunction(:prepare_cgroups_hash, :type => :rvalue, :arity => 1, :doc => <<-EOS
     This function get hash contains service and its cgroups settings(in JSON format) and serialize it.
@@ -64,20 +185,16 @@ Puppet::Parser::Functions::newfunction(:prepare_cgroups_hash, :type => :rvalue, 
   # wipe out UI metadata
   cgroups = argv[0].tap { |el| el.delete('metadata') }
 
-  serialized_data = {}
-
-  cgroups.each do |service, settings|
-    hash_settings = JSON.parse(settings) rescue raise("'#{service}': JSON parsing  error for : #{settings}")
-    hash_settings.each do |group, options|
-      raise("'#{service}': group '#{group}' options is not a HASH instance") unless options.is_a?(Hash)
-      options.each do |option, value|
-        options[option] = CgroupsSettings.handle_value(option, value)
-        raise("'#{service}': group '#{group}': option '#{option}' has wrong value") if options[option].nil?
-      end
-    end
-    serialized_data[service] = hash_settings unless hash_settings.empty?
-  end
-  serialized_data
+  os_fact = Facter.value(:osfamily).to_s
+  parsed_hash =  case os_fact 
+                 when 'Debian'
+                  CgroupsSettings.parse_debian_settings cgroups
+                 when 'RedHat'
+                  CgroupsSettings.parse_redhat_settings cgroups
+                 else
+                  raise "#{os_fact} is not unsupported"
+                 end
+  parsed_hash
 end
 
 # vim: set ts=2 sw=2 et :

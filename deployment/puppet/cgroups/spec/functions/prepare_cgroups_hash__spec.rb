@@ -7,7 +7,9 @@ describe 'prepare_cgroups_hash' do
   end
 
   before(:each) do
-    Facter.stubs(:fact).with(:memorysize_mb).returns Facter.add(:memorysize_mb) { setcode { 1024 } }
+    Facter.clear
+    Facter.stubs(:fact).with(:memorysize_mb).returns Facter.add(:memorysize_mb) { setcode { 1024 } } 
+    Facter.stubs(:fact).with(:osfamily).returns Facter.add(:osfamily) { setcode { 'Debian' } }
   end
 
   context "transform simple hash" do
@@ -245,5 +247,4 @@ describe 'prepare_cgroups_hash' do
     end
 
   end
-
 end

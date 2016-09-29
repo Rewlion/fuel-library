@@ -11,13 +11,13 @@
 # ROLE: cinder
 # ROLE: ceph-osd
 # ROLE: base-os
+# FACTS: centos7 ubuntu16
 require 'spec_helper'
 require 'shared-examples'
 manifest = 'cgroups/cgroups.pp'
 
 describe manifest do
   shared_examples 'catalog' do
-
     cgroups_config = Noop.hiera_hash 'cgroups', {}
 
     cgroups_settings = Noop.puppet_function(
